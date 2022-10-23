@@ -2,96 +2,118 @@ from typing import Tuple
 import torchaudio
 import torch
 
+import torch
 from torch import Tensor
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader
 
 import model
-
-
-# Linear quantization functions adapted from https://github.com/deepsound-project/samplernn-pytorch/
-
-# Quantize the samples to the quantization level
-# samples - the input samples
-# quantization - the level of quantization desired
-# returns a tuple of (quantized_samples, min, max, rounded_min)
-def linear_quantize(samples: Tensor, quantization: int) -> Tuple[Tensor, int, int, int]:
-    samples = samples.clone()
-    max = samples.min(dim=-1).values
-    min = samples.max(dim=-1).values
-    scale = (max - min) / (quantization - 1)
-    samples /= scale
-    samples = samples.long()
-    rounded_min = samples.min(dim=-1).values
-    samples -= rounded_min
-    print(samples)
-    return (samples, min, max, rounded_min)
-
-
-# Dequantize the samples
-# samples - the quantized samples
-# quantization - the level of quantization these samples were initially encoded with
-def linear_dequantize(
-    samples: Tensor, quantization: int, min: int, max: int, rounded_min: int
-) -> Tensor:
-    scale = (max - min) / (quantization - 1)
-    samples = samples.float()
-    return (samples + rounded_min) * scale
-
-
-# Return the "zero" value for the given quantization amount
-def q_zero(quantization: int) -> int:
-    return quantization // 2
-
-
-# Write some audio data to the given path.
-def write_audio_to_file(path: str, audio_data: Tensor, sample_rate: int):
-    # If audio data has only dimension, convert it to a 2D 1 x length tensor instead
-    if len(audio_data.size()) == 1:
-        audio_data = audio_data.view([1, -1])
-    torchaudio.save(path, audio_data, sample_rate)
+from model import BATCH_SIZE, FRAME_SIZE, HIDDEN_SIZE, NUM_FRAMES, QUANTIZATION
+from util import linear_dequantize, linear_quantize, write_audio_to_file
 
 
 class SongDataset(Dataset):
     # Create a new SongDataset from the given path.
     # `path` must be to a file with sound.
-    # `frame_size` must be an integer specifying the size of the frames returned, in samples
+    # `num_frames` - the number of frames per returned element
+    # `frame_size` - the size of the frames per returned element, in samples
+    # `quantization` - the quantization level to use
     # Note that only the left channel is used, if there is more than one channel.
-    def __init__(self, path, frame_size, quantization) -> None:
+    def __init__(self, path: str, num_frames: int, frame_size: int, quantization: int):
         super().__init__()
         (audio, self.sample_rate) = torchaudio.load(path)
 
         # If there are two channels, only take the left channel.
         audio = audio[0]
-        print(audio.size())
 
         (self.audio, self.min, self.max, self.rounded_min) = linear_quantize(
             audio, quantization
         )
-        print(self.audio)
         self.length = self.audio.size()[0]
+        self.num_frames = num_frames
         self.frame_size = frame_size
         self.quantization = quantization
 
     def __len__(self) -> int:
-        pass
+        return self.length - (self.frame_size * (self.num_frames + 1))
 
-    def __getitem__(self, index) -> Tensor:
-        return super().__getitem__(index)
+    def __getitem__(self, index: int) -> Tuple[Tensor, Tensor, Tensor]:
+        seq_len = self.frame_size * self.num_frames
+        input = self.audio[index : index + seq_len]
+        overlap = self.audio[index : index + seq_len + self.frame_size]
+        target = self.audio[index + self.frame_size : index + seq_len + self.frame_size]
+        return input, overlap, target
 
     def dequantize_with(self, data: Tensor) -> Tensor:
         return linear_dequantize(
             data, self.quantization, self.min, self.max, self.rounded_min
         )
 
+    def write_to_file_with(self, path, data: Tensor):
+        dequantized = self.dequantize_with(data)
+        write_audio_to_file(path, dequantized, self.sample_rate)
+
 
 MODEL = model.SampleRNN()
 
 if __name__ == "__main__":
-    dataset = SongDataset("inputs/drumloop.wav", model.FRAME_SIZE, model.QUANTIZATION)
-    write_audio_to_file(
-        "ground_truth.wav",
-        dataset.dequantize_with(dataset.audio),
-        dataset.sample_rate,
+
+    if torch.backends.mps.is_available():
+        print("Using MPS device ")
+        device = torch.device("mps")
+    elif torch.cuda.is_available():
+        print("Using CUDA device ")
+        device = torch.device("cuda")
+    else:
+        print("Using CPU device ")
+        device = torch.device("cpu")
+
+    PREFIX = "outputs/drumloop/drum"
+    dataset = SongDataset(
+        path="inputs/low/drumloop.wav",
+        num_frames=NUM_FRAMES,
+        frame_size=FRAME_SIZE,
+        quantization=QUANTIZATION,
     )
-    print(dataset.audio.size())
+    dataset.write_to_file_with(f"{PREFIX}_ground_truth.wav", dataset.audio)
+    dataset.write_to_file_with(f"{PREFIX}_input_example.wav", dataset.__getitem__(0)[0])
+    dataset.write_to_file_with(
+        f"{PREFIX}_overlap_example.wav", dataset.__getitem__(0)[1]
+    )
+    dataset.write_to_file_with(
+        f"{PREFIX}_target_example.wav", dataset.__getitem__(0)[2]
+    )
+
     print(MODEL)
+
+    dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
+
+    optim = torch.optim.Adam(MODEL.parameters())
+
+    epoch_i = 0
+    while True:
+        for batch_i, batch in enumerate(dataloader):
+            (hidden, cell) = MODEL.frame_level_rnn.init_state(BATCH_SIZE)
+            (input, overlap, target) = batch
+
+            input = dataset.dequantize_with(input) * 2.0
+            input = input.view(BATCH_SIZE, NUM_FRAMES, FRAME_SIZE)
+            (conditioning, new_hidden, new_cell) = MODEL.frame_level_rnn.forward(
+                input, hidden, cell
+            )
+            unfold = overlap.unfold(1, FRAME_SIZE, 1)[:, :-1, :]
+            unfold = unfold.reshape([BATCH_SIZE * NUM_FRAMES * FRAME_SIZE, FRAME_SIZE])
+            conditioning = conditioning.reshape(
+                [BATCH_SIZE * NUM_FRAMES * FRAME_SIZE, HIDDEN_SIZE]
+            )
+            logits = MODEL.sample_predictor.forward(unfold, conditioning)
+            logits = logits.softmax(dim=1)
+
+            target = target.reshape([BATCH_SIZE * NUM_FRAMES * FRAME_SIZE])
+            loss = torch.nn.CrossEntropyLoss()
+            loss = loss(logits, target)
+            loss.backward()
+            optim.step()
+
+            print(f"Batch {batch_i}/{len(dataloader)}")
+        print(f"Epoch {epoch_i}")
+        epoch_i += 1
