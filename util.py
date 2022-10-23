@@ -1,5 +1,6 @@
 from typing import Tuple
 
+import torch
 import torchaudio
 from torch import Tensor
 
@@ -28,7 +29,6 @@ def linear_quantize(samples: Tensor, quantization: int) -> Tuple[Tensor, int, in
     samples = samples.long()
     rounded_min = samples.min(dim=-1).values
     samples -= rounded_min
-    print(samples)
     return (samples, min, max, rounded_min)
 
 
@@ -53,4 +53,4 @@ def write_audio_to_file(path: str, audio_data: Tensor, sample_rate: int):
     # If audio data has only dimension, convert it to a 2D 1 x length tensor instead
     if len(audio_data.size()) == 1:
         audio_data = audio_data.view([1, -1])
-    torchaudio.save(path, audio_data, sample_rate)
+    torchaudio.save(path, audio_data.to(torch.device("cpu")), sample_rate)

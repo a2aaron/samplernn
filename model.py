@@ -9,7 +9,7 @@ from util import assert_shape
 
 NUM_FRAMES = 64
 BATCH_SIZE = 128
-HIDDEN_SIZE = 1024
+HIDDEN_SIZE = 128  # 1024
 FRAME_SIZE = 16
 QUANTIZATION = 256
 EMBED_SIZE = 256
@@ -54,9 +54,11 @@ class FrameLevelRNN(nn.Module):
         )
         return (conditioning, hidden_state, cell_state)
 
-    def init_state(self, batch_size: int) -> Tuple[Tensor, Tensor]:
-        h0 = torch.zeros(RNN_LAYERS, batch_size, HIDDEN_SIZE)
-        c0 = torch.zeros(RNN_LAYERS, batch_size, HIDDEN_SIZE)
+    def init_state(
+        self, batch_size: int, device: torch.device
+    ) -> Tuple[Tensor, Tensor]:
+        h0 = torch.zeros(RNN_LAYERS, batch_size, HIDDEN_SIZE, device=device)
+        c0 = torch.zeros(RNN_LAYERS, batch_size, HIDDEN_SIZE, device=device)
         return h0, c0
 
 
