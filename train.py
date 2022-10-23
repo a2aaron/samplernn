@@ -71,44 +71,88 @@ class SongDataset(Dataset):
         dequantized = self.dequantize_with(data)
         write_audio_to_file(path, dequantized, self.sample_rate)
 
+GENERATION_GRAPH = None
+
+class GenerationGraph:
+    def __init__(self, model: SampleRNN, device: torch.device, num_frames: int):
+        frame_size = model.frame_size
+        hidden_size = model.hidden_size
+        length = num_frames * frame_size
+
+        self.generation_num_frames = num_frames
+        self.generation_size = num_frames * frame_size
+
+        self.samples = torch.zeros(length, dtype=torch.long, device=device)
+        (self.hidden, self.cell) = model.frame_level_rnn.init_state(1, device)
+        g = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g):
+            hidden = self.hidden
+            cell = self.cell
+
+            for t in range(frame_size, length):
+                if t % frame_size == 0:
+                    frame = self.samples[t - frame_size : t]
+                    frame = dataset.dequantize_with(frame) * 2.0
+                    frame = frame.reshape([1, 1, frame_size])
+                    conditioning, hidden, cell = model.frame_level_rnn.forward(
+                        frame, hidden, cell, 1, 1
+                    )
+                    conditioning = conditioning.reshape([frame_size, hidden_size])
+                
+                frame = self.samples[t - frame_size : t]
+                frame = frame.reshape([1, frame_size])
+                this_conditioning = conditioning[t % frame_size].reshape([1, hidden_size])
+                logits = model.sample_predictor.forward(frame, this_conditioning, 1)
+                sample = logits.softmax(-1)
+                sample = sample.multinomial(1, replacement=True)
+
+                self.samples[t] = sample
+            self.hidden.copy_(hidden)
+            self.cell.copy_(cell)
+
+    def init_state(self, model: SampleRNN, device: torch.device, prompt_samples: Tensor):
+        self.samples.fill_(0)
+        self.samples[0:frame_size].copy_(prompt_samples)
+
+        (init_hidden, init_cell) = model.frame_level_rnn.init_state(1, device)
+        self.hidden.copy_(init_hidden)
+        self.cell.copy_(init_cell)
+        self.conditioning.fill_(0.0)
+    
+    def set_prompt(self, prompt_samples: Tensor):
+        self.samples.fill_(0)
+        self.samples[0:frame_size].copy_(prompt_samples)
+    
+    def replay(self):
+        self.graph.replay()
 
 def generate(
-    model: model.SampleRNN, device: torch.device, dataset: SongDataset, length: int
+    model: SampleRNN, device: torch.device, dataset: SongDataset, length: int
 ):
+    global GENERATION_GRAPH
+    if GENERATION_GRAPH is None:
+        now = time.time()
+        GENERATION_GRAPH = GenerationGraph(model, device, 500)
+        print(f"Took {pretty_elapsed(now)} to build graph.")
+
     frame_size = model.frame_size
     hidden_size = model.hidden_size
 
-    samples = torch.zeros(length, dtype=torch.long, device=device)
-    # set first frame to zeros.
-    samples[0:frame_size] = dataset.get_frame(
-        random.randrange(0, dataset.length - dataset.frame_size)
-    )
+    num_generation_frames = length // GENERATION_GRAPH.generation_size
 
-    (hidden, cell) = model.frame_level_rnn.init_state(1, device)
-    conditioning = None
+    out_samples = torch.zeros([num_generation_frames, GENERATION_GRAPH.generation_size], dtype=torch.long, device=device)
+   
     now = time.time()
-    for t in range(frame_size, length):
-        if t % frame_size == 0:
-            frame = samples[t - frame_size : t]
-            frame = dataset.dequantize_with(frame) * 2.0
-            frame = frame.reshape([1, 1, frame_size])
-            conditioning, hidden, cell = model.frame_level_rnn.forward(
-                frame, hidden, cell, 1, 1
-            )
-            conditioning = conditioning.reshape([frame_size, hidden_size])
-        frame = samples[t - frame_size : t]
-        frame = frame.reshape([1, frame_size])
-        this_conditioning = conditioning[t % frame_size].reshape([1, hidden_size])
-        logits = model.sample_predictor.forward(frame, this_conditioning, 1)
-        sample = logits.softmax(-1).multinomial(1, replacement=False)
+    
+    prompt = dataset.get_frame(random.randrange(0, dataset.length - dataset.frame_size))
+    GENERATION_GRAPH.init_state(model, device, prompt)
 
-        samples[t] = sample
-        if t % 10000 == 0:
-            print(
-                f"Generated {t}/{length} samples ({100.0 * t/length:.2f})% in {pretty_elapsed(now)}"
-            )
-            now = time.time()
-    return samples
+    for i in range(0, num_generation_frames):
+        GENERATION_GRAPH.replay()
+        out_samples[i].copy_(GENERATION_GRAPH.samples)
+
+    print(f"Took {pretty_elapsed(now)} to replay graph")
+    return out_samples.flatten()
 
 
 def write_args(path: str, args):
@@ -313,10 +357,9 @@ if __name__ == "__main__":
         print(
             f"Resuming from checkpoint at {args.resume} (iter: {iter_i}, epoch: {epoch_i})"
         )
-
+    now = time.time()
     while True:
         for batch_i, batch in enumerate(dataloader):
-            now = time.time()
             (input, unfold, target) = batch
             batch_size = input.size()[0]
             frame_size = the_model.frame_size
@@ -349,22 +392,18 @@ if __name__ == "__main__":
             optim.zero_grad()
             loss.backward()
             optim.step()
-            print(
-                f"Iter {iter_i} ({batch_i}/{len(dataloader)}), loss: {loss:.4f}, accuracy: {100.0 * accuracy:.2f}% (in {pretty_elapsed(now)})"
-            )
-
-            if iter_i % 10 == 0:
+            
+            if iter_i != 0 and iter_i % generate_every == 0:
                 write_csv(f"{PREFIX}_losses.csv", losses)
 
-            if iter_i != 0 and iter_i % generate_every == 0:
                 length_in_samples = int(length * dataset.sample_rate)
                 for gen_i in range(num_generated):
                     now = time.time()
                     samples = generate(the_model, DEVICE, dataset, length_in_samples)
+                    print(f"Generated file in {pretty_elapsed(now)} seconds")
                     dataset.write_to_file_with(
                         f"{PREFIX}_epoch_{epoch_i}_iter_{iter_i}_{gen_i}.wav", samples
                     )
-                    print(f"Generated file in {pretty_elapsed(now)} seconds")
 
             if iter_i != 0 and iter_i % checkpoint_every == 0:
                 try:
@@ -407,6 +446,11 @@ if __name__ == "__main__":
                     )
                     num_generated = new_args["num_generated"]
 
+            if iter_i % 10 == 0:
+                print(
+                    f"Iter {iter_i} ({batch_i}/{len(dataloader)}), loss: {loss:.4f}, accuracy: {100.0 * accuracy:.2f}% (in {pretty_elapsed(now)})"
+                )
+                now = time.time()
             iter_i += 1
         print(f"Epoch {epoch_i}")
         epoch_i += 1
