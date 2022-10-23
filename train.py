@@ -10,7 +10,7 @@ import torch
 from torch import Tensor
 from torch.utils.data import Dataset, DataLoader
 
-import model
+from sample_rnn import SampleRNN
 from util import linear_dequantize, linear_quantize, q_zero, write_audio_to_file
 
 
@@ -258,7 +258,7 @@ if __name__ == "__main__":
         print("Using CPU device ")
         DEVICE = torch.device("cpu")
 
-    the_model = model.SampleRNN(
+    the_model = SampleRNN(
         frame_size=args.frame_size,
         hidden_size=args.hidden_size,
         rnn_layers=args.rnn_layers,
