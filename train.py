@@ -191,7 +191,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--num_generated",
         type=int,
-        default=5,
+        default=1,
         help="how many files to generate at once",
     )
 
