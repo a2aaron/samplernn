@@ -162,7 +162,7 @@ def write_csv(path, losses):
 def pretty_elapsed(now: float) -> str:
     elapsed = time.time() - now
     if elapsed < 1:
-        return f"{int(elapsed/1000)}ms"
+        return f"{int(elapsed * 1000)}ms"
     if elapsed < 10:
         return f"{elapsed:.2f}s"
     return f"{elapsed:.1f}s"
