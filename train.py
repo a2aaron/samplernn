@@ -1,14 +1,13 @@
-from email.mime import audio
 from typing import Tuple
-import torchaudio
-import torch
 
+import os
+import argparse
+import torchaudio
 import torch
 from torch import Tensor
 from torch.utils.data import Dataset, DataLoader
 
 import model
-from model import BATCH_SIZE, FRAME_SIZE, HIDDEN_SIZE, NUM_FRAMES, QUANTIZATION
 from util import linear_dequantize, linear_quantize, q_zero, write_audio_to_file
 
 
@@ -37,7 +36,7 @@ class SongDataset(Dataset):
             audio, quantization
         )
 
-        unfold = audio.unfold(0, FRAME_SIZE, 1)
+        unfold = audio.unfold(0, frame_size, 1)
 
         self.audio = audio.to(device)
         self.unfold = unfold.to(device)
@@ -66,26 +65,32 @@ class SongDataset(Dataset):
         write_audio_to_file(path, dequantized, self.sample_rate)
 
 
-def generate(length, dataset: SongDataset):
-    samples = torch.zeros(length, dtype=torch.long, device=DEVICE)
-    # set first frame to zeros.
-    samples[0:FRAME_SIZE] = q_zero(QUANTIZATION)
+def generate(
+    model: model.SampleRNN, device: torch.device, dataset: SongDataset, length: int
+):
+    frame_size = model.frame_size
+    quantization = model.quantization
+    hidden_size = model.hidden_size
 
-    (hidden, cell) = MODEL.frame_level_rnn.init_state(1, DEVICE)
+    samples = torch.zeros(length, dtype=torch.long, device=device)
+    # set first frame to zeros.
+    samples[0:frame_size] = q_zero(quantization)
+
+    (hidden, cell) = model.frame_level_rnn.init_state(1, device)
     conditioning = None
-    for t in range(FRAME_SIZE, length):
-        if t % FRAME_SIZE == 0:
-            frame = samples[t - FRAME_SIZE : t]
+    for t in range(frame_size, length):
+        if t % frame_size == 0:
+            frame = samples[t - frame_size : t]
             frame = dataset.dequantize_with(frame) * 2.0
-            frame = frame.reshape([1, 1, FRAME_SIZE])
-            conditioning, hidden, cell = MODEL.frame_level_rnn.forward(
+            frame = frame.reshape([1, 1, frame_size])
+            conditioning, hidden, cell = model.frame_level_rnn.forward(
                 frame, hidden, cell, 1, 1
             )
-            conditioning = conditioning.reshape([FRAME_SIZE, HIDDEN_SIZE])
-        frame = samples[t - FRAME_SIZE : t]
-        frame = frame.reshape([1, FRAME_SIZE])
-        this_conditioning = conditioning[t % FRAME_SIZE].reshape([1, HIDDEN_SIZE])
-        logits = MODEL.sample_predictor.forward(frame, this_conditioning, 1)
+            conditioning = conditioning.reshape([frame_size, hidden_size])
+        frame = samples[t - frame_size : t]
+        frame = frame.reshape([1, frame_size])
+        this_conditioning = conditioning[t % frame_size].reshape([1, hidden_size])
+        logits = model.sample_predictor.forward(frame, this_conditioning, 1)
         sample = logits.softmax(-1).multinomial(1, replacement=False)
 
         samples[t] = sample
@@ -95,6 +100,71 @@ def generate(length, dataset: SongDataset):
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        argument_default=argparse.SUPPRESS,
+    )
+    parser.add_argument("-o", "--out", required=True, help="output folder name")
+    parser.add_argument(
+        "-i", "--in", dest="in_path", required=True, help="path to input music file"
+    )
+    parser.add_argument(
+        "--frame_size", type=int, default=16, help="size of frames, in samples"
+    )
+    parser.add_argument(
+        "--rnn_layers", type=int, default=5, help="number of RNN layers in the LSTM"
+    )
+    parser.add_argument(
+        "--hidden_size",
+        type=int,
+        default=1024,
+        help="number of neurons in RNN and MLP layers",
+    )
+    parser.add_argument(
+        "--embed_size",
+        type=int,
+        default=256,
+        help="size of embedding in MLP layer",
+    )
+    parser.add_argument(
+        "--quantization",
+        type=int,
+        default=256,
+        help="number of quantization values for samples",
+    )
+    parser.add_argument(
+        "--num_frames",
+        type=int,
+        default=64,
+        help="number of frames to use in truncated BPTT training",
+    )
+    parser.add_argument("--batch_size", type=int, default=128, help="batch size")
+    parser.add_argument(
+        "--sample_rate",
+        type=int,
+        help="sample rate of the training data and generated sound",
+    )
+    parser.add_argument(
+        "--length",
+        type=float,
+        default=10.0,
+        help="length of samples, in seconds, to generate",
+    )
+    parser.add_argument(
+        "--generate_every",
+        type=int,
+        default=100,
+        help="how often to generate samples, in batch iterations",
+    )
+    parser.add_argument(
+        "--checkpoint_every",
+        type=int,
+        default=100,
+        help="how often to checkpoint, in batch iterations",
+    )
+
+    args = parser.parse_args()
+
     if torch.backends.mps.is_available():
         # print("Using MPS device")
         # DEVICE = torch.device("mps")
@@ -111,15 +181,28 @@ if __name__ == "__main__":
         print("Using CPU device ")
         DEVICE = torch.device("cpu")
 
-    MODEL = model.SampleRNN()
-    MODEL.to(DEVICE)
+    the_model = model.SampleRNN(
+        frame_size=args.frame_size,
+        hidden_size=args.hidden_size,
+        rnn_layers=args.rnn_layers,
+        embed_size=args.embed_size,
+        quantization=args.quantization,
+    )
+    the_model.to(DEVICE)
 
-    PREFIX = "outputs/drumloop/drum"
+    batch_size = args.batch_size
+    num_frames = args.num_frames
+    frame_size = args.frame_size
+    hidden_size = args.hidden_size
+
+    PREFIX = f"outputs/{args.out}/{args.out}"
+    os.makedirs(f"outputs/{args.out}/", exist_ok=True)
+
     dataset = SongDataset(
-        path="inputs/low/drumloop.wav",
-        num_frames=NUM_FRAMES,
-        frame_size=FRAME_SIZE,
-        quantization=QUANTIZATION,
+        path=args.in_path,
+        num_frames=args.num_frames,
+        frame_size=args.frame_size,
+        quantization=args.quantization,
         device=DEVICE,
     )
     dataset.write_to_file_with(f"{PREFIX}_ground_truth.wav", dataset.audio)
@@ -131,35 +214,35 @@ if __name__ == "__main__":
         f"{PREFIX}_target_example.wav", dataset.__getitem__(0)[2]
     )
 
-    dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
-    optim = torch.optim.Adam(MODEL.parameters())
+    optim = torch.optim.Adam(the_model.parameters())
 
     epoch_i = 0
     while True:
         for batch_i, batch in enumerate(dataloader):
-            (hidden, cell) = MODEL.frame_level_rnn.init_state(BATCH_SIZE, DEVICE)
+            (hidden, cell) = the_model.frame_level_rnn.init_state(batch_size, DEVICE)
             (input, unfold, target) = batch
 
             input = dataset.dequantize_with(input) * 2.0
-            input = input.view(BATCH_SIZE, NUM_FRAMES, FRAME_SIZE)
-            (conditioning, new_hidden, new_cell) = MODEL.frame_level_rnn.forward(
-                input, hidden, cell, BATCH_SIZE, NUM_FRAMES
+            input = input.view(batch_size, num_frames, frame_size)
+            (conditioning, new_hidden, new_cell) = the_model.frame_level_rnn.forward(
+                input, hidden, cell, batch_size, num_frames
             )
-            unfold = unfold.reshape([BATCH_SIZE * NUM_FRAMES * FRAME_SIZE, FRAME_SIZE])
+            unfold = unfold.reshape([batch_size * num_frames * frame_size, frame_size])
 
             conditioning = conditioning.reshape(
-                [BATCH_SIZE * NUM_FRAMES * FRAME_SIZE, HIDDEN_SIZE]
+                [batch_size * num_frames * frame_size, hidden_size]
             )
-            logits = MODEL.sample_predictor.forward(
-                unfold, conditioning, BATCH_SIZE * NUM_FRAMES * FRAME_SIZE
+            logits = the_model.sample_predictor.forward(
+                unfold, conditioning, batch_size * num_frames * frame_size
             )
 
-            target = target.reshape([BATCH_SIZE * NUM_FRAMES * FRAME_SIZE])
+            target = target.reshape([batch_size * num_frames * frame_size])
             loss = torch.nn.CrossEntropyLoss()
             loss = loss(logits, target)
             num_correct = logits.argmax(-1, keepdim=False).eq(target).count_nonzero()
-            accuracy = num_correct / (BATCH_SIZE * NUM_FRAMES * FRAME_SIZE)
+            accuracy = num_correct / (batch_size * num_frames * frame_size)
 
             optim.zero_grad()
             loss.backward()
@@ -169,9 +252,9 @@ if __name__ == "__main__":
                 f"Batch {batch_i}/{len(dataloader)}, loss: {loss:.4f}, accuracy: {100.0 * accuracy:.2f}%"
             )
 
-            if batch_i % 100 == 0:
-                length = 5 * dataset.sample_rate
-                samples = generate(length, dataset)
+            if batch_i % args.generate_every == 0:
+                length = int(args.length * dataset.sample_rate)
+                samples = generate(the_model, DEVICE, dataset, length)
                 dataset.write_to_file_with(
                     f"{PREFIX}_epoch_{epoch_i}_batch_{batch_i}.wav", samples
                 )

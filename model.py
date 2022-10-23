@@ -7,32 +7,46 @@ from torch import Tensor
 
 from util import assert_shape
 
-NUM_FRAMES = 64
-BATCH_SIZE = 128
-HIDDEN_SIZE = 1024
-FRAME_SIZE = 16
-QUANTIZATION = 256
-EMBED_SIZE = 256
-RNN_LAYERS = 5
-
 
 class SampleRNN(nn.Module):
-    def __init__(self):
+    def __init__(
+        self,
+        frame_size: int,
+        hidden_size: int,
+        rnn_layers: int,
+        embed_size: int,
+        quantization: int,
+    ):
         super().__init__()
-        self.frame_level_rnn = FrameLevelRNN()
-        self.sample_predictor = SamplePredictor()
+        self.frame_level_rnn = FrameLevelRNN(
+            frame_size=frame_size, hidden_size=hidden_size, rnn_layers=rnn_layers
+        )
+        self.sample_predictor = SamplePredictor(
+            frame_size=frame_size,
+            embed_size=embed_size,
+            hidden_size=hidden_size,
+            quantization=quantization,
+        )
+        self.frame_size = frame_size
+        self.hidden_size = hidden_size
+        self.rnn_layers = rnn_layers
+        self.embed_size = embed_size
+        self.quantization = quantization
 
 
 class FrameLevelRNN(nn.Module):
-    def __init__(self):
+    def __init__(self, frame_size: int, hidden_size: int, rnn_layers: int):
         super().__init__()
         self.lstm = nn.LSTM(
-            input_size=FRAME_SIZE,
-            hidden_size=HIDDEN_SIZE,
-            num_layers=RNN_LAYERS,
+            input_size=frame_size,
+            hidden_size=hidden_size,
+            num_layers=rnn_layers,
             batch_first=True,
         )
-        self.linear = nn.Linear(HIDDEN_SIZE, HIDDEN_SIZE * FRAME_SIZE)
+        self.linear = nn.Linear(hidden_size, hidden_size * frame_size)
+        self.frame_size = frame_size
+        self.hidden_size = hidden_size
+        self.rnn_layers = rnn_layers
 
     def forward(
         self,
@@ -42,8 +56,8 @@ class FrameLevelRNN(nn.Module):
         batch_size: int,
         num_frames: int,
     ) -> Tuple[Tensor, Tensor]:
-        assert_shape((batch_size, num_frames, FRAME_SIZE), frames)
-        assert_shape((RNN_LAYERS, batch_size, HIDDEN_SIZE), hidden_state)
+        assert_shape((batch_size, num_frames, self.frame_size), frames)
+        assert_shape((self.rnn_layers, batch_size, self.hidden_size), hidden_state)
 
         (conditioning, (hidden_state, cell_state)) = self.lstm.forward(
             frames, (hidden_state, cell_state)
@@ -54,7 +68,7 @@ class FrameLevelRNN(nn.Module):
             (
                 batch_size,
                 num_frames,
-                FRAME_SIZE * HIDDEN_SIZE,
+                self.frame_size * self.hidden_size,
             ),
             conditioning,
         )
@@ -63,30 +77,36 @@ class FrameLevelRNN(nn.Module):
     def init_state(
         self, batch_size: int, device: torch.device
     ) -> Tuple[Tensor, Tensor]:
-        h0 = torch.zeros(RNN_LAYERS, batch_size, HIDDEN_SIZE, device=device)
-        c0 = torch.zeros(RNN_LAYERS, batch_size, HIDDEN_SIZE, device=device)
+        h0 = torch.zeros(self.rnn_layers, batch_size, self.hidden_size, device=device)
+        c0 = torch.zeros(self.rnn_layers, batch_size, self.hidden_size, device=device)
         return h0, c0
 
 
 class SamplePredictor(nn.Module):
-    def __init__(self):
+    def __init__(
+        self, frame_size: int, embed_size: int, hidden_size: int, quantization: int
+    ):
         super().__init__()
-        self.embed = nn.Embedding(num_embeddings=QUANTIZATION, embedding_dim=EMBED_SIZE)
+        self.embed = nn.Embedding(num_embeddings=quantization, embedding_dim=embed_size)
         self.linear_1 = nn.Linear(
-            in_features=FRAME_SIZE * EMBED_SIZE, out_features=HIDDEN_SIZE
+            in_features=frame_size * embed_size, out_features=hidden_size
         )
-        self.linear_2 = nn.Linear(in_features=HIDDEN_SIZE, out_features=HIDDEN_SIZE)
-        self.linear_3 = nn.Linear(in_features=HIDDEN_SIZE, out_features=HIDDEN_SIZE)
-        self.linear_4 = nn.Linear(in_features=HIDDEN_SIZE, out_features=QUANTIZATION)
+        self.linear_2 = nn.Linear(in_features=hidden_size, out_features=hidden_size)
+        self.linear_3 = nn.Linear(in_features=hidden_size, out_features=hidden_size)
+        self.linear_4 = nn.Linear(in_features=hidden_size, out_features=quantization)
+        self.frame_size = frame_size
+        self.embed_size = embed_size
+        self.hidden_size = hidden_size
+        self.quantization = quantization
 
     def forward(
         self, frames: Tensor, conditionings: Tensor, num_samples: int
     ) -> Tensor:
-        assert_shape((num_samples, FRAME_SIZE), frames)
-        assert_shape((num_samples, HIDDEN_SIZE), conditionings)
+        assert_shape((num_samples, self.frame_size), frames)
+        assert_shape((num_samples, self.hidden_size), conditionings)
 
         frames = self.embed.forward(frames)
-        frames = frames.reshape([num_samples, FRAME_SIZE * EMBED_SIZE])
+        frames = frames.reshape([num_samples, self.frame_size * self.embed_size])
 
         frames = self.linear_1.forward(frames)
         frames = frames + conditionings
