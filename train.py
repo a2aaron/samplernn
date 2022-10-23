@@ -1,5 +1,6 @@
-from typing import Tuple
+from typing import Tuple, Union
 
+import json
 import os
 import argparse
 import torchaudio
@@ -99,6 +100,43 @@ def generate(
     return samples
 
 
+def write_args(path: str, args):
+    try:
+        with open(path, "wt") as file:
+            args = {
+                "length": args.length,
+                "generate_every": args.generate_every,
+                "checkpoint_every": args.checkpoint_every,
+                "num_generated": args.num_generated,
+            }
+            json.dump(
+                args,
+                file,
+                sort_keys=True,
+                indent=4,
+            )
+    except Exception as e:
+        print(f"Couldn't write {args} to file {path}, Reason:", e)
+
+
+def read_args(path) -> Union[dict, None]:
+    try:
+        with open(path, "rt") as file:
+            args = json.load(file)
+            for arg in [
+                "length",
+                "generate_every",
+                "checkpoint_every",
+                "num_generated",
+            ]:
+                if arg not in args.keys():
+                    print(f"[Warning] Parsed json {args} does not have argument {arg}!")
+            return args
+    except Exception as e:
+        print(f"Couldn't read from file {path}, Reason:", e)
+        return None
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -151,6 +189,13 @@ if __name__ == "__main__":
         help="length of samples, in seconds, to generate",
     )
     parser.add_argument(
+        "--num_generated",
+        type=int,
+        default=5,
+        help="how many files to generate at once",
+    )
+
+    parser.add_argument(
         "--generate_every",
         type=int,
         default=100,
@@ -161,6 +206,9 @@ if __name__ == "__main__":
         type=int,
         default=100,
         help="how often to checkpoint, in batch iterations",
+    )
+    parser.add_argument(
+        "--resume", type=str, default=None, help="if passed, load from a checkpoint"
     )
 
     args = parser.parse_args()
@@ -181,28 +229,36 @@ if __name__ == "__main__":
         print("Using CPU device ")
         DEVICE = torch.device("cpu")
 
-    the_model = model.SampleRNN(
-        frame_size=args.frame_size,
-        hidden_size=args.hidden_size,
-        rnn_layers=args.rnn_layers,
-        embed_size=args.embed_size,
-        quantization=args.quantization,
-    )
-    the_model.to(DEVICE)
+    the_model = None
+    if args.resume is not None:
+        the_model = torch.load(args.resume)
+        the_model.eval()
+    else:
+        the_model = model.SampleRNN(
+            frame_size=args.frame_size,
+            hidden_size=args.hidden_size,
+            rnn_layers=args.rnn_layers,
+            embed_size=args.embed_size,
+            quantization=args.quantization,
+        )
 
-    batch_size = args.batch_size
-    num_frames = args.num_frames
-    frame_size = args.frame_size
-    hidden_size = args.hidden_size
+    the_model = the_model.to(DEVICE)
+
+    generate_every = args.generate_every
+    checkpoint_every = args.checkpoint_every
+    length = args.length
+    num_generated = args.num_generated
 
     PREFIX = f"outputs/{args.out}/{args.out}"
+    ARGS_FILE = f"outputs/{args.out}/{args.out}_args.json"
     os.makedirs(f"outputs/{args.out}/", exist_ok=True)
+    write_args(ARGS_FILE, args)
 
     dataset = SongDataset(
         path=args.in_path,
         num_frames=args.num_frames,
-        frame_size=args.frame_size,
-        quantization=args.quantization,
+        frame_size=the_model.frame_size,
+        quantization=the_model.quantization,
         device=DEVICE,
     )
     dataset.write_to_file_with(f"{PREFIX}_ground_truth.wav", dataset.audio)
@@ -214,15 +270,20 @@ if __name__ == "__main__":
         f"{PREFIX}_target_example.wav", dataset.__getitem__(0)[2]
     )
 
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True)
 
     optim = torch.optim.Adam(the_model.parameters())
 
     epoch_i = 0
+    iter_i = 0
     while True:
         for batch_i, batch in enumerate(dataloader):
-            (hidden, cell) = the_model.frame_level_rnn.init_state(batch_size, DEVICE)
             (input, unfold, target) = batch
+            batch_size = input.size()[0]
+            frame_size = the_model.frame_size
+            num_frames = input.size()[1] // frame_size
+
+            (hidden, cell) = the_model.frame_level_rnn.init_state(batch_size, DEVICE)
 
             input = dataset.dequantize_with(input) * 2.0
             input = input.view(batch_size, num_frames, frame_size)
@@ -232,7 +293,7 @@ if __name__ == "__main__":
             unfold = unfold.reshape([batch_size * num_frames * frame_size, frame_size])
 
             conditioning = conditioning.reshape(
-                [batch_size * num_frames * frame_size, hidden_size]
+                [batch_size * num_frames * frame_size, the_model.hidden_size]
             )
             logits = the_model.sample_predictor.forward(
                 unfold, conditioning, batch_size * num_frames * frame_size
@@ -247,16 +308,50 @@ if __name__ == "__main__":
             optim.zero_grad()
             loss.backward()
             optim.step()
-
             print(
-                f"Batch {batch_i}/{len(dataloader)}, loss: {loss:.4f}, accuracy: {100.0 * accuracy:.2f}%"
+                f"Iter {iter_i} ({batch_i}/{len(dataloader)}), loss: {loss:.4f}, accuracy: {100.0 * accuracy:.2f}%"
             )
 
-            if batch_i % args.generate_every == 0:
-                length = int(args.length * dataset.sample_rate)
-                samples = generate(the_model, DEVICE, dataset, length)
-                dataset.write_to_file_with(
-                    f"{PREFIX}_epoch_{epoch_i}_batch_{batch_i}.wav", samples
-                )
+            if iter_i != 0 and iter_i % generate_every == 0:
+                length_in_samples = int(length * dataset.sample_rate)
+                for gen_i in range(num_generated):
+                    samples = generate(the_model, DEVICE, dataset, length_in_samples)
+                    dataset.write_to_file_with(
+                        f"{PREFIX}_epoch_{epoch_i}_iter_{iter_i}_{gen_i}.wav", samples
+                    )
+
+            if iter_i != 0 and iter_i % checkpoint_every == 0:
+                try:
+                    file_path = f"{PREFIX}_epoch_{epoch_i}_iter_{iter_i}_model.pt"
+                    torch.save(
+                        the_model.state_dict(),
+                        file_path,
+                    )
+                    print(f"Successfully checkpointed model to {file_path}")
+                except Exception as e:
+                    print(f"Couldn't checkpoint to file, reason:", e)
+
+            new_args = read_args(ARGS_FILE)
+            if new_args is not None:
+                if generate_every != new_args["generate_every"]:
+                    print(
+                        f"updated generate_every: {generate_every} -> {new_args['generate_every']}"
+                    )
+                    generate_every = new_args["generate_every"]
+                if checkpoint_every != new_args["checkpoint_every"]:
+                    print(
+                        f"updated checkpoint_every: {checkpoint_every} -> {new_args['checkpoint_every']}"
+                    )
+                    checkpoint_every = new_args["checkpoint_every"]
+                if length != new_args["length"]:
+                    print(f"updated length: {length} -> {new_args['length']}")
+                    length = new_args["length"]
+                if num_generated != new_args["num_generated"]:
+                    print(
+                        f"updated num_generated: {num_generated} -> {new_args['num_generated']}"
+                    )
+                    num_generated = new_args["num_generated"]
+
+            iter_i += 1
         print(f"Epoch {epoch_i}")
         epoch_i += 1
