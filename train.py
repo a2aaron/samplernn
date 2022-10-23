@@ -220,7 +220,10 @@ if __name__ == "__main__":
         help="how often to checkpoint, in batch iterations",
     )
     parser.add_argument(
-        "--resume", type=str, default=None, help="if passed, load from a checkpoint"
+        "--resume",
+        type=str,
+        default=None,
+        help="if passed, load model weights from a checkpoint",
     )
 
     args = parser.parse_args()
@@ -241,20 +244,13 @@ if __name__ == "__main__":
         print("Using CPU device ")
         DEVICE = torch.device("cpu")
 
-    the_model = None
-    if args.resume is not None:
-        the_model = torch.load(args.resume)
-        the_model.eval()
-    else:
-        the_model = model.SampleRNN(
-            frame_size=args.frame_size,
-            hidden_size=args.hidden_size,
-            rnn_layers=args.rnn_layers,
-            embed_size=args.embed_size,
-            quantization=args.quantization,
-        )
-
-    the_model = the_model.to(DEVICE)
+    the_model = model.SampleRNN(
+        frame_size=args.frame_size,
+        hidden_size=args.hidden_size,
+        rnn_layers=args.rnn_layers,
+        embed_size=args.embed_size,
+        quantization=args.quantization,
+    ).to(DEVICE)
 
     generate_every = args.generate_every
     checkpoint_every = args.checkpoint_every
@@ -292,6 +288,18 @@ if __name__ == "__main__":
     epoch_i = 0
     iter_i = 0
     losses = []
+
+    if args.resume is not None:
+        resume_info = torch.load(args.resume)
+        the_model.load_state_dict(resume_info["model"])
+        result = optim.load_state_dict(resume_info["optim"])
+        epoch_i = resume_info["epoch"]
+        iter_i = resume_info["iter"]
+        losses = resume_info["losses"]
+        print(
+            f"Resuming from checkpoint at {args.resume} (iter: {iter_i}, epoch: {epoch_i})"
+        )
+
     while True:
         for batch_i, batch in enumerate(dataloader):
             (input, unfold, target) = batch
@@ -345,10 +353,16 @@ if __name__ == "__main__":
                 try:
                     file_path = f"{PREFIX}_epoch_{epoch_i}_iter_{iter_i}_model.pt"
                     torch.save(
-                        the_model.state_dict(),
+                        {
+                            "model": the_model.state_dict(),
+                            "optim": optim.state_dict(),
+                            "epoch": epoch_i,
+                            "iter": iter_i,
+                            "losses": losses,
+                        },
                         file_path,
                     )
-                    print(f"Successfully checkpointed model to {file_path}")
+                    print(f"Successfully checkpointed to {file_path}")
                 except Exception as e:
                     print(f"Couldn't checkpoint to file, reason:", e)
 
