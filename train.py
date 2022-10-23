@@ -37,9 +37,7 @@ class SongDataset(Dataset):
             audio, quantization
         )
 
-        print(audio.size())
         unfold = audio.unfold(0, FRAME_SIZE, 1)
-        print(unfold.size())
 
         self.audio = audio.to(device)
         self.unfold = unfold.to(device)
@@ -69,7 +67,7 @@ class SongDataset(Dataset):
 
 
 def generate(length, dataset: SongDataset):
-    samples = torch.zeros(length, dtype=torch.long)
+    samples = torch.zeros(length, dtype=torch.long, device=DEVICE)
     # set first frame to zeros.
     samples[0:FRAME_SIZE] = q_zero(QUANTIZATION)
 
@@ -132,8 +130,6 @@ if __name__ == "__main__":
     dataset.write_to_file_with(
         f"{PREFIX}_target_example.wav", dataset.__getitem__(0)[2]
     )
-
-    print(MODEL)
 
     dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
 
