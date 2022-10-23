@@ -1,3 +1,4 @@
+from email.mime import audio
 from typing import Tuple
 import torchaudio
 import torch
@@ -8,7 +9,7 @@ from torch.utils.data import Dataset, DataLoader
 
 import model
 from model import BATCH_SIZE, FRAME_SIZE, HIDDEN_SIZE, NUM_FRAMES, QUANTIZATION
-from util import linear_dequantize, linear_quantize, write_audio_to_file
+from util import linear_dequantize, linear_quantize, q_zero, write_audio_to_file
 
 
 class SongDataset(Dataset):
@@ -67,6 +68,34 @@ class SongDataset(Dataset):
         write_audio_to_file(path, dequantized, self.sample_rate)
 
 
+def generate(length, dataset: SongDataset):
+    samples = torch.zeros(length, dtype=torch.long)
+    # set first frame to zeros.
+    samples[0:FRAME_SIZE] = q_zero(QUANTIZATION)
+
+    (hidden, cell) = MODEL.frame_level_rnn.init_state(1, DEVICE)
+    conditioning = None
+    for t in range(FRAME_SIZE, length):
+        if t % FRAME_SIZE == 0:
+            frame = samples[t - FRAME_SIZE : t]
+            frame = dataset.dequantize_with(frame) * 2.0
+            frame = frame.reshape([1, 1, FRAME_SIZE])
+            conditioning, hidden, cell = MODEL.frame_level_rnn.forward(
+                frame, hidden, cell, 1, 1
+            )
+            conditioning = conditioning.reshape([FRAME_SIZE, HIDDEN_SIZE])
+        frame = samples[t - FRAME_SIZE : t]
+        frame = frame.reshape([1, FRAME_SIZE])
+        this_conditioning = conditioning[t % FRAME_SIZE].reshape([1, HIDDEN_SIZE])
+        logits = MODEL.sample_predictor.forward(frame, this_conditioning, 1)
+        sample = logits.softmax(-1).multinomial(1, replacement=False)
+
+        samples[t] = sample
+        if t % 10000 == 0:
+            print(f"Generated {t}/{length} samples ({100.0 * t/length:.2f})%")
+    return samples
+
+
 if __name__ == "__main__":
     if torch.backends.mps.is_available():
         # print("Using MPS device")
@@ -119,14 +148,16 @@ if __name__ == "__main__":
             input = dataset.dequantize_with(input) * 2.0
             input = input.view(BATCH_SIZE, NUM_FRAMES, FRAME_SIZE)
             (conditioning, new_hidden, new_cell) = MODEL.frame_level_rnn.forward(
-                input, hidden, cell
+                input, hidden, cell, BATCH_SIZE, NUM_FRAMES
             )
             unfold = unfold.reshape([BATCH_SIZE * NUM_FRAMES * FRAME_SIZE, FRAME_SIZE])
 
             conditioning = conditioning.reshape(
                 [BATCH_SIZE * NUM_FRAMES * FRAME_SIZE, HIDDEN_SIZE]
             )
-            logits = MODEL.sample_predictor.forward(unfold, conditioning)
+            logits = MODEL.sample_predictor.forward(
+                unfold, conditioning, BATCH_SIZE * NUM_FRAMES * FRAME_SIZE
+            )
 
             target = target.reshape([BATCH_SIZE * NUM_FRAMES * FRAME_SIZE])
             loss = torch.nn.CrossEntropyLoss()
@@ -141,5 +172,12 @@ if __name__ == "__main__":
             print(
                 f"Batch {batch_i}/{len(dataloader)}, loss: {loss:.4f}, accuracy: {100.0 * accuracy:.2f}%"
             )
+
+            if batch_i % 100 == 0:
+                length = 5 * dataset.sample_rate
+                samples = generate(length, dataset)
+                dataset.write_to_file_with(
+                    f"{PREFIX}_epoch_{epoch_i}_batch_{batch_i}.wav", samples
+                )
         print(f"Epoch {epoch_i}")
         epoch_i += 1
