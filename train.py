@@ -109,6 +109,7 @@ class GenerationGraph:
                 self.samples[t] = sample
             self.hidden.copy_(hidden)
             self.cell.copy_(cell)
+        self.graph = g
 
     def init_state(self, model: SampleRNN, device: torch.device, prompt_samples: Tensor):
         self.samples.fill_(0)
@@ -117,7 +118,6 @@ class GenerationGraph:
         (init_hidden, init_cell) = model.frame_level_rnn.init_state(1, device)
         self.hidden.copy_(init_hidden)
         self.cell.copy_(init_cell)
-        self.conditioning.fill_(0.0)
     
     def set_prompt(self, prompt_samples: Tensor):
         self.samples.fill_(0)
@@ -132,7 +132,7 @@ def generate(
     global GENERATION_GRAPH
     if GENERATION_GRAPH is None:
         now = time.time()
-        GENERATION_GRAPH = GenerationGraph(model, device, 500)
+        GENERATION_GRAPH = GenerationGraph(model, device, 128)
         print(f"Took {pretty_elapsed(now)} to build graph.")
 
     frame_size = model.frame_size
@@ -357,7 +357,7 @@ if __name__ == "__main__":
         print(
             f"Resuming from checkpoint at {args.resume} (iter: {iter_i}, epoch: {epoch_i})"
         )
-    now = time.time()
+    iter_now = time.time()
     while True:
         for batch_i, batch in enumerate(dataloader):
             (input, unfold, target) = batch
@@ -392,6 +392,12 @@ if __name__ == "__main__":
             optim.zero_grad()
             loss.backward()
             optim.step()
+
+            if iter_i % 10 == 0:
+                print(
+                    f"Iter {iter_i} ({batch_i}/{len(dataloader)}), loss: {loss:.4f}, accuracy: {100.0 * accuracy:.2f}% (in {pretty_elapsed(iter_now)})"
+                )
+                iter_now = time.time()
             
             if iter_i != 0 and iter_i % generate_every == 0:
                 write_csv(f"{PREFIX}_losses.csv", losses)
@@ -446,11 +452,7 @@ if __name__ == "__main__":
                     )
                     num_generated = new_args["num_generated"]
 
-            if iter_i % 10 == 0:
-                print(
-                    f"Iter {iter_i} ({batch_i}/{len(dataloader)}), loss: {loss:.4f}, accuracy: {100.0 * accuracy:.2f}% (in {pretty_elapsed(now)})"
-                )
-                now = time.time()
+           
             iter_i += 1
         print(f"Epoch {epoch_i}")
         epoch_i += 1
