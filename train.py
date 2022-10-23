@@ -1,4 +1,5 @@
 import random
+import time
 from typing import Tuple, Union
 
 import json
@@ -85,6 +86,7 @@ def generate(
 
     (hidden, cell) = model.frame_level_rnn.init_state(1, device)
     conditioning = None
+    now = time.time()
     for t in range(frame_size, length):
         if t % frame_size == 0:
             frame = samples[t - frame_size : t]
@@ -102,7 +104,10 @@ def generate(
 
         samples[t] = sample
         if t % 10000 == 0:
-            print(f"Generated {t}/{length} samples ({100.0 * t/length:.2f})%")
+            print(
+                f"Generated {t}/{length} samples ({100.0 * t/length:.2f})% in {pretty_elapsed(now)}"
+            )
+            now = time.time()
     return samples
 
 
@@ -152,6 +157,15 @@ def write_csv(path, losses):
             file.write(losses_str)
     except Exception as e:
         print(f"Couldn't write losses to file {path}, Reason:", e)
+
+
+def pretty_elapsed(now: float) -> str:
+    elapsed = time.time() - now
+    if elapsed < 1:
+        return f"{int(elapsed/1000)}ms"
+    if elapsed < 10:
+        return f"{elapsed:.2f}s"
+    return f"{elapsed:.1f}s"
 
 
 if __name__ == "__main__":
@@ -302,6 +316,7 @@ if __name__ == "__main__":
 
     while True:
         for batch_i, batch in enumerate(dataloader):
+            now = time.time()
             (input, unfold, target) = batch
             batch_size = input.size()[0]
             frame_size = the_model.frame_size
@@ -335,7 +350,7 @@ if __name__ == "__main__":
             loss.backward()
             optim.step()
             print(
-                f"Iter {iter_i} ({batch_i}/{len(dataloader)}), loss: {loss:.4f}, accuracy: {100.0 * accuracy:.2f}%"
+                f"Iter {iter_i} ({batch_i}/{len(dataloader)}), loss: {loss:.4f}, accuracy: {100.0 * accuracy:.2f}% (in {pretty_elapsed(now)})"
             )
 
             if iter_i % 10 == 0:
@@ -344,13 +359,16 @@ if __name__ == "__main__":
             if iter_i != 0 and iter_i % generate_every == 0:
                 length_in_samples = int(length * dataset.sample_rate)
                 for gen_i in range(num_generated):
+                    now = time.time()
                     samples = generate(the_model, DEVICE, dataset, length_in_samples)
                     dataset.write_to_file_with(
                         f"{PREFIX}_epoch_{epoch_i}_iter_{iter_i}_{gen_i}.wav", samples
                     )
+                    print(f"Generated file in {pretty_elapsed(now)} seconds")
 
             if iter_i != 0 and iter_i % checkpoint_every == 0:
                 try:
+                    now = time.time()
                     file_path = f"{PREFIX}_epoch_{epoch_i}_iter_{iter_i}_model.pt"
                     torch.save(
                         {
@@ -362,7 +380,9 @@ if __name__ == "__main__":
                         },
                         file_path,
                     )
-                    print(f"Successfully checkpointed to {file_path}")
+                    print(
+                        f"Successfully checkpointed to {file_path} in {pretty_elapsed(now)}"
+                    )
                 except Exception as e:
                     print(f"Couldn't checkpoint to file, reason:", e)
 
