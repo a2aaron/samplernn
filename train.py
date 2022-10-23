@@ -1,3 +1,4 @@
+import random
 from typing import Tuple, Union
 
 import json
@@ -56,6 +57,10 @@ class SongDataset(Dataset):
         target = self.audio[index + self.frame_size : index + seq_len + self.frame_size]
         return input, unfold, target
 
+    def get_frame(self, index: int) -> Tensor:
+        input = self.audio[index : index + self.frame_size]
+        return input
+
     def dequantize_with(self, data: Tensor) -> Tensor:
         return linear_dequantize(
             data, self.quantization, self.min, self.max, self.rounded_min
@@ -70,12 +75,13 @@ def generate(
     model: model.SampleRNN, device: torch.device, dataset: SongDataset, length: int
 ):
     frame_size = model.frame_size
-    quantization = model.quantization
     hidden_size = model.hidden_size
 
     samples = torch.zeros(length, dtype=torch.long, device=device)
     # set first frame to zeros.
-    samples[0:frame_size] = q_zero(quantization)
+    samples[0:frame_size] = dataset.get_frame(
+        random.randrange(0, dataset.length - dataset.frame_size)
+    )
 
     (hidden, cell) = model.frame_level_rnn.init_state(1, device)
     conditioning = None
@@ -137,6 +143,17 @@ def read_args(path) -> Union[dict, None]:
         return None
 
 
+def write_csv(path, losses):
+    try:
+        losses_str = "iter,loss\n"
+        for loss_i, loss in enumerate(losses):
+            losses_str += f"{loss_i}, {loss}\n"
+        with open(path, "wt") as file:
+            file.write(losses_str)
+    except Exception as e:
+        print(f"Couldn't write losses to file {path}, Reason:", e)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -177,11 +194,6 @@ if __name__ == "__main__":
         help="number of frames to use in truncated BPTT training",
     )
     parser.add_argument("--batch_size", type=int, default=128, help="batch size")
-    parser.add_argument(
-        "--sample_rate",
-        type=int,
-        help="sample rate of the training data and generated sound",
-    )
     parser.add_argument(
         "--length",
         type=float,
@@ -250,7 +262,7 @@ if __name__ == "__main__":
     num_generated = args.num_generated
 
     PREFIX = f"outputs/{args.out}/{args.out}"
-    ARGS_FILE = f"outputs/{args.out}/{args.out}_args.json"
+    ARGS_FILE = f"{PREFIX}_args.json"
     os.makedirs(f"outputs/{args.out}/", exist_ok=True)
     write_args(ARGS_FILE, args)
 
@@ -262,12 +274,15 @@ if __name__ == "__main__":
         device=DEVICE,
     )
     dataset.write_to_file_with(f"{PREFIX}_ground_truth.wav", dataset.audio)
-    dataset.write_to_file_with(f"{PREFIX}_input_example.wav", dataset.__getitem__(0)[0])
+    rand_i = random.randrange(0, len(dataset))
     dataset.write_to_file_with(
-        f"{PREFIX}_overlap_example.wav", dataset.__getitem__(0)[1].flatten()
+        f"{PREFIX}_input_example.wav", dataset.__getitem__(rand_i)[0]
     )
     dataset.write_to_file_with(
-        f"{PREFIX}_target_example.wav", dataset.__getitem__(0)[2]
+        f"{PREFIX}_overlap_example.wav", dataset.__getitem__(rand_i)[1].flatten()
+    )
+    dataset.write_to_file_with(
+        f"{PREFIX}_target_example.wav", dataset.__getitem__(rand_i)[2]
     )
 
     dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True)
@@ -276,6 +291,7 @@ if __name__ == "__main__":
 
     epoch_i = 0
     iter_i = 0
+    losses = []
     while True:
         for batch_i, batch in enumerate(dataloader):
             (input, unfold, target) = batch
@@ -302,6 +318,8 @@ if __name__ == "__main__":
             target = target.reshape([batch_size * num_frames * frame_size])
             loss = torch.nn.CrossEntropyLoss()
             loss = loss(logits, target)
+
+            losses.append(loss.item())
             num_correct = logits.argmax(-1, keepdim=False).eq(target).count_nonzero()
             accuracy = num_correct / (batch_size * num_frames * frame_size)
 
@@ -311,6 +329,9 @@ if __name__ == "__main__":
             print(
                 f"Iter {iter_i} ({batch_i}/{len(dataloader)}), loss: {loss:.4f}, accuracy: {100.0 * accuracy:.2f}%"
             )
+
+            if iter_i % 10 == 0:
+                write_csv(f"{PREFIX}_losses.csv", losses)
 
             if iter_i != 0 and iter_i % generate_every == 0:
                 length_in_samples = int(length * dataset.sample_rate)
