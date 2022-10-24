@@ -179,7 +179,8 @@ class GenerationGraph:
 # Run generation on the model. This returns a 1D Tensor containing approximately
 # `length` samples. (The tensor may not be exactly length samples). The tensor's
 # first `frame_size` samples consist of a prompt from passed in `dataset`
-def generate(
+# This requires that the model is running on CUDA, as it uses CUDAGraphs internally.
+def generate_cuda(
     model: SampleRNN, device: torch.device, dataset: SongDataset, length: int
 ) -> Tensor:
     global GENERATION_GRAPH
@@ -221,6 +222,62 @@ def generate(
     print(f"Took {pretty_elapsed(now)} to replay graph")
     # Include the prompt with the generateds samples.
     return torch.cat((prompt, out_samples.flatten()))
+
+
+# Run generation on the model. This returns a 1D Tensor containing exactly
+# `length` samples. The tensor's first `frame_size` samples consist of a prompt from
+# passed in `dataset` This does not require that the model is running on the CPU, however
+# it is likely very very slow unless it actually is on the CPU.
+def generate_cpu(
+    model: SampleRNN, device: torch.device, dataset: SongDataset, length: int
+) -> Tensor:
+    frame_size = model.frame_size
+    hidden_size = model.hidden_size
+
+    samples = torch.zeros(length, dtype=torch.long, device=device)
+    # set first frame to zeros.
+    samples[0:frame_size] = dataset.get_frame(
+        random.randrange(0, dataset.length - dataset.frame_size)
+    )
+
+    (hidden, cell) = model.frame_level_rnn.init_state(1, device)
+    conditioning = None
+    now = time.time()
+    for t in range(frame_size, length):
+        if t % frame_size == 0:
+            frame = samples[t - frame_size : t]
+            frame = dataset.dequantize_with(frame) * 2.0
+            frame = frame.reshape([1, 1, frame_size])
+            conditioning, hidden, cell = model.frame_level_rnn.forward(
+                frame, hidden, cell, 1, 1
+            )
+            conditioning = conditioning.reshape([frame_size, hidden_size])
+        frame = samples[t - frame_size : t]
+        frame = frame.reshape([1, frame_size])
+        this_conditioning = conditioning[t % frame_size].reshape([1, hidden_size])
+        logits = model.sample_predictor.forward(frame, this_conditioning, 1)
+        sample = logits.softmax(-1).multinomial(1, replacement=False)
+
+        samples[t] = sample
+        if t % 10000 == 0:
+            print(
+                f"Generated {t}/{length} samples ({100.0 * t/length:.2f})% in {pretty_elapsed(now)}"
+            )
+            now = time.time()
+    return samples
+
+
+# Run generation on the model. This returns a 1D Tensor containing approximately
+# `length` samples. (The tensor may not be exactly length samples). The tensor's
+# first `frame_size` samples consist of a prompt from passed in `dataset`
+# If the passed device is CUDA, this function attempts to use CUDAGraphs to speed up computation.
+def generate(
+    model: SampleRNN, device: torch.device, dataset: SongDataset, length: int
+) -> Tensor:
+    if device.type == "cuda":
+        return generate_cuda(model, device, dataset, length)
+    else:
+        return generate_cpu(model, device, dataset, length)
 
 
 # Write the updatable args from the command line arguments object
