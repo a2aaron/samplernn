@@ -16,7 +16,12 @@ Note that this reimplementation is designed for passing in _single audio files_,
 
 # Installation & Setup
 The only dependencies required are `torch` and `torchaudio`. Any version should work, but as of this
-writing (Oct 23, 2022), the versions used are: `torch 1.14.0` and `torchaudio 0.14.0`
+writing (Oct 23, 2022), the versions used are: `torch 1.14.0` and `torchaudio 0.14.0`. You can get 
+Pytorch [here](https://pytorch.org/get-started/locally/).
+
+Note that if you are planning to use CUDA, you will need CUDA 11.3 or 11.6 (hence, be sure to install
+the `cu113` or `cu116` version of Pytorch). This is because the network uses CUDAGraphs to speed up 
+generation.
 
 # Quickstart Guide:
 ```
