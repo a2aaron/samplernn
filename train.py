@@ -140,7 +140,7 @@ def generate(
 
     num_generation_frames = length // GENERATION_GRAPH.generation_size
 
-    out_samples = torch.zeros([num_generation_frames, GENERATION_GRAPH.generation_size], dtype=torch.long, device=device)
+    out_samples = torch.zeros([num_generation_frames, GENERATION_GRAPH.generation_size - frame_size], dtype=torch.long, device=device)
    
     now = time.time()
     
@@ -149,10 +149,12 @@ def generate(
 
     for i in range(0, num_generation_frames):
         GENERATION_GRAPH.replay()
-        out_samples[i].copy_(GENERATION_GRAPH.samples)
+        out_samples[i].copy_(GENERATION_GRAPH.samples[:-frame_size])
+        new_prompt = GENERATION_GRAPH.samples[-frame_size:].clone()
+        GENERATION_GRAPH.set_prompt(new_prompt)
 
     print(f"Took {pretty_elapsed(now)} to replay graph")
-    return out_samples.flatten()
+    return torch.cat((prompt, out_samples.flatten()))
 
 
 def write_args(path: str, args):
@@ -406,10 +408,12 @@ if __name__ == "__main__":
                 for gen_i in range(num_generated):
                     now = time.time()
                     samples = generate(the_model, DEVICE, dataset, length_in_samples)
-                    print(f"Generated file in {pretty_elapsed(now)} seconds")
+                    print(f"Generated file in {pretty_elapsed(now)}")
+                    now = time.time()
                     dataset.write_to_file_with(
                         f"{PREFIX}_epoch_{epoch_i}_iter_{iter_i}_{gen_i}.wav", samples
                     )
+                    print(f"Wrote generated file in {pretty_elapsed(now)}")
 
             if iter_i != 0 and iter_i % checkpoint_every == 0:
                 try:
