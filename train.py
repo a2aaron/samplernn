@@ -355,37 +355,6 @@ if __name__ == "__main__":
         "-i", "--in", dest="in_path", required=True, help="path to input music file"
     )
     parser.add_argument(
-        "--frame_size", type=int, default=16, help="size of frames, in samples"
-    )
-    parser.add_argument(
-        "--rnn_layers", type=int, default=5, help="number of RNN layers in the LSTM"
-    )
-    parser.add_argument(
-        "--hidden_size",
-        type=int,
-        default=1024,
-        help="number of neurons in RNN and MLP layers",
-    )
-    parser.add_argument(
-        "--embed_size",
-        type=int,
-        default=256,
-        help="size of embedding in MLP layer",
-    )
-    parser.add_argument(
-        "--quantization",
-        type=int,
-        default=256,
-        help="number of quantization values for samples",
-    )
-    parser.add_argument(
-        "--num_frames",
-        type=int,
-        default=64,
-        help="number of frames to use in truncated BPTT training",
-    )
-    parser.add_argument("--batch_size", type=int, default=128, help="batch size")
-    parser.add_argument(
         "--length",
         type=float,
         default=10.0,
@@ -415,6 +384,37 @@ if __name__ == "__main__":
         type=str,
         default=None,
         help="if passed, load model weights from a checkpoint",
+    )
+    parser.add_argument("--batch_size", type=int, default=128, help="batch size")
+    parser.add_argument(
+        "--frame_size", type=int, default=16, help="size of frames, in samples"
+    )
+    parser.add_argument(
+        "--num_frames",
+        type=int,
+        default=64,
+        help="number of frames to use in truncated BPTT training",
+    )
+    parser.add_argument(
+        "--hidden_size",
+        type=int,
+        default=1024,
+        help="number of neurons in RNN and MLP layers",
+    )
+    parser.add_argument(
+        "--rnn_layers", type=int, default=5, help="number of RNN layers in the LSTM"
+    )
+    parser.add_argument(
+        "--embed_size",
+        type=int,
+        default=256,
+        help="size of embedding in MLP layer",
+    )
+    parser.add_argument(
+        "--quantization",
+        type=int,
+        default=256,
+        help="number of quantization values for samples",
     )
 
     args = parser.parse_args()
