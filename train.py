@@ -524,6 +524,9 @@ if __name__ == "__main__":
 
             optim.zero_grad()
             loss.backward()
+
+            # Gradient clipping (avoid loss blowups)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optim.step()
 
             if iter_i % 10 == 0:
