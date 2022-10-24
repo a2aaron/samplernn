@@ -71,6 +71,7 @@ class SongDataset(Dataset):
         dequantized = self.dequantize_with(data)
         write_audio_to_file(path, dequantized, self.sample_rate)
 
+
 GENERATION_GRAPH = None
 
 # Wrapper struct for the CUDAGraph which can generate audio of files.
@@ -84,7 +85,7 @@ class GenerationGraph:
     # `num_frames` controls how many frames of audio are generated per call of
     # `replay`. A higher value means more frames are generated at once, but also
     # requires more memory and compute.
-    # In particular, the number of samples generated when replay is called is 
+    # In particular, the number of samples generated when replay is called is
     # equal to num_frames * frame_size.
     # The CUDAGraph is extremely memory intensive--you probably cannot set num_frames
     # to an extremely large value.
@@ -117,18 +118,20 @@ class GenerationGraph:
                         frame, hidden, cell, 1, 1
                     )
                     conditioning = conditioning.reshape([frame_size, hidden_size])
-                
+
                 frame = self.samples[t - frame_size : t]
                 frame = frame.reshape([1, frame_size])
                 # Note that conditioning vectors are shaped like
                 # [batch_size, frame_size, frame_size * hidden_size]
                 # or, in this case, [1, frame_size, frame_size * hidden_size]
-                # Each vector of [frame_size * hidden_size] is for each of the  
+                # Each vector of [frame_size * hidden_size] is for each of the
                 # of the sliding window frames. Since there are `frame_size` sliding
                 # windows for each frame, there are also `frame_size` conditioning
                 # vectors. Hence ,we pick out the right conditioning vector
                 # (This explains why we do conditioning[t % frame_size])
-                this_conditioning = conditioning[t % frame_size].reshape([1, hidden_size])
+                this_conditioning = conditioning[t % frame_size].reshape(
+                    [1, hidden_size]
+                )
                 logits = model.sample_predictor.forward(frame, this_conditioning, 1)
                 sample = logits.softmax(-1)
                 # Note that replacement here doesn't actually matter, since we
@@ -146,21 +149,23 @@ class GenerationGraph:
     # Set the initial state for generation. This sets `self.hidden` and `self.cell`
     # to the initial zero-state, as well as setting up `self.samples` to have the
     # given prompt.
-    def init_state(self, model: SampleRNN, device: torch.device, prompt_samples: Tensor):
+    def init_state(
+        self, model: SampleRNN, device: torch.device, prompt_samples: Tensor
+    ):
         self.samples.fill_(0)
         self.samples[0:frame_size].copy_(prompt_samples)
 
         (init_hidden, init_cell) = model.frame_level_rnn.init_state(1, device)
         self.hidden.copy_(init_hidden)
         self.cell.copy_(init_cell)
-    
+
     # Set the subseqent states for generation. This sets `self.samples` to have
     # the prompt samples at the beginning, followed entirely by zeros.
     # `prompt_samples` should be a 1D tensor of length `frame_size``
     def set_prompt(self, prompt_samples: Tensor):
         self.samples.fill_(0)
         self.samples[0:frame_size].copy_(prompt_samples)
-    
+
     # Replay the CUDAGraph. This will result in two things:
     # First, `self.samples` will be filled with the generated samples (note that
     # the first `frame_size` samples are the prompt and are unchanged--the rest
@@ -169,6 +174,7 @@ class GenerationGraph:
     # states produced by generation
     def replay(self):
         self.graph.replay()
+
 
 # Run generation on the model. This returns a 1D Tensor containing approximately
 # `length` samples. (The tensor may not be exactly length samples). The tensor's
@@ -191,10 +197,14 @@ def generate(
     num_generation_frames = length // GENERATION_GRAPH.generation_size
 
     # The tensor containing the returned samples.
-    out_samples = torch.zeros([num_generation_frames, GENERATION_GRAPH.generation_size - frame_size], dtype=torch.long, device=device)
-   
+    out_samples = torch.zeros(
+        [num_generation_frames, GENERATION_GRAPH.generation_size - frame_size],
+        dtype=torch.long,
+        device=device,
+    )
+
     now = time.time()
-    
+
     prompt = dataset.get_frame(random.randrange(0, dataset.length - dataset.frame_size))
     GENERATION_GRAPH.init_state(model, device, prompt)
 
@@ -211,6 +221,7 @@ def generate(
     print(f"Took {pretty_elapsed(now)} to replay graph")
     # Include the prompt with the generateds samples.
     return torch.cat((prompt, out_samples.flatten()))
+
 
 # Write the updatable args from the command line arguments object
 # This writes a JSON file to the given path. If the file cannot be written, an
@@ -254,6 +265,7 @@ def read_args(path) -> Union[dict, None]:
         print(f"Couldn't read from file {path}, Reason:", e)
         return None
 
+
 # Write a CSV file containign the losses
 def write_csv(path, losses):
     try:
@@ -264,6 +276,7 @@ def write_csv(path, losses):
             file.write(losses_str)
     except Exception as e:
         print(f"Couldn't write losses to file {path}, Reason:", e)
+
 
 # Pretty print the elapsed time.
 def pretty_elapsed(now: float) -> str:
@@ -461,7 +474,7 @@ if __name__ == "__main__":
                     f"Iter {iter_i} ({batch_i}/{len(dataloader)}), loss: {loss:.4f}, accuracy: {100.0 * accuracy:.2f}% (in {pretty_elapsed(iter_now)})"
                 )
                 iter_now = time.time()
-            
+
             if iter_i != 0 and iter_i % generate_every == 0:
                 write_csv(f"{PREFIX}_losses.csv", losses)
 
@@ -517,7 +530,6 @@ if __name__ == "__main__":
                     )
                     num_generated = new_args["num_generated"]
 
-           
             iter_i += 1
         print(f"Epoch {epoch_i}")
         epoch_i += 1
