@@ -378,7 +378,7 @@ if __name__ == "__main__":
         print("Using CPU device ")
         DEVICE = torch.device("cpu")
 
-    the_model = SampleRNN(
+    model = SampleRNN(
         frame_size=args.frame_size,
         hidden_size=args.hidden_size,
         rnn_layers=args.rnn_layers,
@@ -399,8 +399,8 @@ if __name__ == "__main__":
     dataset = SongDataset(
         path=args.in_path,
         num_frames=args.num_frames,
-        frame_size=the_model.frame_size,
-        quantization=the_model.quantization,
+        frame_size=model.frame_size,
+        quantization=model.quantization,
         device=DEVICE,
     )
     dataset.write_to_file_with(f"{PREFIX}_ground_truth.wav", dataset.audio)
@@ -417,7 +417,7 @@ if __name__ == "__main__":
 
     dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True)
 
-    optim = torch.optim.Adam(the_model.parameters())
+    optim = torch.optim.Adam(model.parameters())
 
     epoch_i = 0
     iter_i = 0
@@ -425,7 +425,7 @@ if __name__ == "__main__":
 
     if args.resume is not None:
         resume_info = torch.load(args.resume)
-        the_model.load_state_dict(resume_info["model"])
+        model.load_state_dict(resume_info["model"])
         result = optim.load_state_dict(resume_info["optim"])
         epoch_i = resume_info["epoch"]
         iter_i = resume_info["iter"]
@@ -438,22 +438,22 @@ if __name__ == "__main__":
         for batch_i, batch in enumerate(dataloader):
             (input, unfold, target) = batch
             batch_size = input.size()[0]
-            frame_size = the_model.frame_size
+            frame_size = model.frame_size
             num_frames = input.size()[1] // frame_size
 
-            (hidden, cell) = the_model.frame_level_rnn.init_state(batch_size, DEVICE)
+            (hidden, cell) = model.frame_level_rnn.init_state(batch_size, DEVICE)
 
             input = dataset.dequantize_with(input) * 2.0
             input = input.view(batch_size, num_frames, frame_size)
-            (conditioning, new_hidden, new_cell) = the_model.frame_level_rnn.forward(
+            (conditioning, new_hidden, new_cell) = model.frame_level_rnn.forward(
                 input, hidden, cell, batch_size, num_frames
             )
             unfold = unfold.reshape([batch_size * num_frames * frame_size, frame_size])
 
             conditioning = conditioning.reshape(
-                [batch_size * num_frames * frame_size, the_model.hidden_size]
+                [batch_size * num_frames * frame_size, model.hidden_size]
             )
-            logits = the_model.sample_predictor.forward(
+            logits = model.sample_predictor.forward(
                 unfold, conditioning, batch_size * num_frames * frame_size
             )
 
@@ -481,7 +481,7 @@ if __name__ == "__main__":
                 length_in_samples = int(length * dataset.sample_rate)
                 for gen_i in range(num_generated):
                     now = time.time()
-                    samples = generate(the_model, DEVICE, dataset, length_in_samples)
+                    samples = generate(model, DEVICE, dataset, length_in_samples)
                     print(f"Generated file in {pretty_elapsed(now)}")
                     now = time.time()
                     dataset.write_to_file_with(
@@ -495,7 +495,7 @@ if __name__ == "__main__":
                     file_path = f"{PREFIX}_epoch_{epoch_i}_iter_{iter_i}_model.pt"
                     torch.save(
                         {
-                            "model": the_model.state_dict(),
+                            "model": model.state_dict(),
                             "optim": optim.state_dict(),
                             "epoch": epoch_i,
                             "iter": iter_i,
