@@ -528,68 +528,68 @@ if __name__ == "__main__":
             # Gradient clipping (avoid loss blowups)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optim.step()
-
-            if iter_i % 10 == 0:
-                print(
-                    f"Iter {iter_i} ({batch_i}/{len(dataloader)}), loss: {loss:.4f}, accuracy: {100.0 * accuracy:.2f}% (in {pretty_elapsed(iter_now)})"
-                )
-                iter_now = time.time()
-
-            if iter_i != 0 and iter_i % generate_every == 0:
-                write_csv(f"{PREFIX}_losses.csv", losses)
-
-                length_in_samples = int(length * dataset.sample_rate)
-                for gen_i in range(num_generated):
-                    now = time.time()
-                    samples = generate(model, DEVICE, dataset, length_in_samples)
-                    print(f"Generated file in {pretty_elapsed(now)}")
-                    now = time.time()
-                    dataset.write_to_file_with(
-                        f"{PREFIX}_epoch_{epoch_i}_iter_{iter_i}_{gen_i}.wav", samples
-                    )
-                    print(f"Wrote generated file in {pretty_elapsed(now)}")
-
-            if iter_i != 0 and iter_i % checkpoint_every == 0:
-                try:
-                    now = time.time()
-                    file_path = f"{PREFIX}_epoch_{epoch_i}_iter_{iter_i}_model.pt"
-                    torch.save(
-                        {
-                            "model": model.state_dict(),
-                            "optim": optim.state_dict(),
-                            "epoch": epoch_i,
-                            "iter": iter_i,
-                            "losses": losses,
-                        },
-                        file_path,
-                    )
+            with torch.inference_mode():
+                if iter_i % 10 == 0:
                     print(
-                        f"Successfully checkpointed to {file_path} in {pretty_elapsed(now)}"
+                        f"Iter {iter_i} ({batch_i}/{len(dataloader)}), loss: {loss:.4f}, accuracy: {100.0 * accuracy:.2f}% (in {pretty_elapsed(iter_now)})"
                     )
-                except Exception as e:
-                    print(f"Couldn't checkpoint to file, reason:", e)
+                    iter_now = time.time()
 
-            new_args = read_args(ARGS_FILE)
-            if new_args is not None:
-                if generate_every != new_args["generate_every"]:
-                    print(
-                        f"updated generate_every: {generate_every} -> {new_args['generate_every']}"
-                    )
-                    generate_every = new_args["generate_every"]
-                if checkpoint_every != new_args["checkpoint_every"]:
-                    print(
-                        f"updated checkpoint_every: {checkpoint_every} -> {new_args['checkpoint_every']}"
-                    )
-                    checkpoint_every = new_args["checkpoint_every"]
-                if length != new_args["length"]:
-                    print(f"updated length: {length} -> {new_args['length']}")
-                    length = new_args["length"]
-                if num_generated != new_args["num_generated"]:
-                    print(
-                        f"updated num_generated: {num_generated} -> {new_args['num_generated']}"
-                    )
-                    num_generated = new_args["num_generated"]
+                if iter_i != 0 and iter_i % generate_every == 0:
+                    write_csv(f"{PREFIX}_losses.csv", losses)
 
-            iter_i += 1
+                    length_in_samples = int(length * dataset.sample_rate)
+                    for gen_i in range(num_generated):
+                        now = time.time()
+                        samples = generate(model, DEVICE, dataset, length_in_samples)
+                        print(f"Generated file in {pretty_elapsed(now)}")
+                        now = time.time()
+                        dataset.write_to_file_with(
+                            f"{PREFIX}_epoch_{epoch_i}_iter_{iter_i}_{gen_i}.wav", samples
+                        )
+                        print(f"Wrote generated file in {pretty_elapsed(now)}")
+
+                if iter_i != 0 and iter_i % checkpoint_every == 0:
+                    try:
+                        now = time.time()
+                        file_path = f"{PREFIX}_epoch_{epoch_i}_iter_{iter_i}_model.pt"
+                        torch.save(
+                            {
+                                "model": model.state_dict(),
+                                "optim": optim.state_dict(),
+                                "epoch": epoch_i,
+                                "iter": iter_i,
+                                "losses": losses,
+                            },
+                            file_path,
+                        )
+                        print(
+                            f"Successfully checkpointed to {file_path} in {pretty_elapsed(now)}"
+                        )
+                    except Exception as e:
+                        print(f"Couldn't checkpoint to file, reason:", e)
+
+                new_args = read_args(ARGS_FILE)
+                if new_args is not None:
+                    if generate_every != new_args["generate_every"]:
+                        print(
+                            f"updated generate_every: {generate_every} -> {new_args['generate_every']}"
+                        )
+                        generate_every = new_args["generate_every"]
+                    if checkpoint_every != new_args["checkpoint_every"]:
+                        print(
+                            f"updated checkpoint_every: {checkpoint_every} -> {new_args['checkpoint_every']}"
+                        )
+                        checkpoint_every = new_args["checkpoint_every"]
+                    if length != new_args["length"]:
+                        print(f"updated length: {length} -> {new_args['length']}")
+                        length = new_args["length"]
+                    if num_generated != new_args["num_generated"]:
+                        print(
+                            f"updated num_generated: {num_generated} -> {new_args['num_generated']}"
+                        )
+                        num_generated = new_args["num_generated"]
+
+                iter_i += 1
         print(f"Epoch {epoch_i}")
         epoch_i += 1
