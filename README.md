@@ -58,3 +58,10 @@ When running a training/generation session, the output folder will be filled wit
 - `out_ground_truth.wav` - A copy of the input file, after being quantized. This lets you check that the training data is sounds as you expect it to.
 - `out_input_example.wav`,  `out_target_example.wav`, and `out_overlap_example.wav`, - These are single training examples consisting, respectively, of the input data, target data, and the overlap of both. This is just for debugging purposes.
 - `out_losses.csv` - A CSV file containing the loss at each iteration of the model.
+
+# Useful links:
+
+The original SampleRNN paper: https://arxiv.org/abs/1612.07837
+SampleRNN original repo (in Tensorflow, used as reference): https://github.com/soroushmehr/sampleRNN_ICLR2017
+DadaBot's fork of the original Tensorflow repo: https://github.com/Cortexelus/dadabots_sampleRNN
+DeepSound's Pytorch reimpl (used as reference): https://github.com/deepsound-project/samplernn-pytorch 
