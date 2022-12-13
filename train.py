@@ -1,6 +1,6 @@
 import random
 import time
-from typing import Tuple, Union
+from typing import List, Tuple, Union
 
 import json
 import os
@@ -335,6 +335,36 @@ def write_csv(path, losses):
         print(f"Couldn't write losses to file {path}, Reason:", e)
 
 
+# Attempt to checkpoint the model to the given file path. Returns true if the file was checkpointed
+# successfully, otherwise returns false and prints a message to console.
+def write_checkpoint(
+    prefix: str,
+    epoch_i: int,
+    iter_i: int,
+    model: torch.nn.Module,
+    optim: torch.optim.Optimizer,
+    losses: List[float],
+) -> bool:
+    try:
+        now = time.time()
+        file_path = f"{prefix}_epoch_{epoch_i}_iter_{iter_i}_model.pt"
+        torch.save(
+            {
+                "model": model.state_dict(),
+                "optim": optim.state_dict(),
+                "epoch": epoch_i,
+                "iter": iter_i,
+                "losses": losses,
+            },
+            file_path,
+        )
+        print(f"Successfully checkpointed to {file_path} in {pretty_elapsed(now)}")
+        return True
+    except Exception as e:
+        print(f"Couldn't checkpoint to file, reason:", e)
+        return False
+
+
 # Pretty print the elapsed time.
 def pretty_elapsed(now: float) -> str:
     elapsed = time.time() - now
@@ -491,105 +521,99 @@ if __name__ == "__main__":
             f"Resuming from checkpoint at {args.resume} (iter: {iter_i}, epoch: {epoch_i})"
         )
     iter_now = time.time()
-    while True:
-        for batch_i, batch in enumerate(dataloader):
-            (input, unfold, target) = batch
-            batch_size = input.size()[0]
-            frame_size = model.frame_size
-            num_frames = input.size()[1] // frame_size
+    try:
+        while True:
+            for batch_i, batch in enumerate(dataloader):
+                (input, unfold, target) = batch
+                batch_size = input.size()[0]
+                frame_size = model.frame_size
+                num_frames = input.size()[1] // frame_size
 
-            (hidden, cell) = model.frame_level_rnn.init_state(batch_size, DEVICE)
+                (hidden, cell) = model.frame_level_rnn.init_state(batch_size, DEVICE)
 
-            input = dataset.dequantize_with(input) * 2.0
-            input = input.view(batch_size, num_frames, frame_size)
-            (conditioning, new_hidden, new_cell) = model.frame_level_rnn.forward(
-                input, hidden, cell, batch_size, num_frames
-            )
-            unfold = unfold.reshape([batch_size * num_frames * frame_size, frame_size])
+                input = dataset.dequantize_with(input) * 2.0
+                input = input.view(batch_size, num_frames, frame_size)
+                (conditioning, new_hidden, new_cell) = model.frame_level_rnn.forward(
+                    input, hidden, cell, batch_size, num_frames
+                )
+                unfold = unfold.reshape(
+                    [batch_size * num_frames * frame_size, frame_size]
+                )
 
-            conditioning = conditioning.reshape(
-                [batch_size * num_frames * frame_size, model.hidden_size]
-            )
-            logits = model.sample_predictor.forward(
-                unfold, conditioning, batch_size * num_frames * frame_size
-            )
+                conditioning = conditioning.reshape(
+                    [batch_size * num_frames * frame_size, model.hidden_size]
+                )
+                logits = model.sample_predictor.forward(
+                    unfold, conditioning, batch_size * num_frames * frame_size
+                )
 
-            target = target.reshape([batch_size * num_frames * frame_size])
-            loss = torch.nn.CrossEntropyLoss()
-            loss = loss(logits, target)
+                target = target.reshape([batch_size * num_frames * frame_size])
+                loss = torch.nn.CrossEntropyLoss()
+                loss = loss(logits, target)
 
-            losses.append(loss.item())
-            num_correct = logits.argmax(-1, keepdim=False).eq(target).count_nonzero()
-            accuracy = num_correct / (batch_size * num_frames * frame_size)
+                losses.append(loss.item())
+                num_correct = (
+                    logits.argmax(-1, keepdim=False).eq(target).count_nonzero()
+                )
+                accuracy = num_correct / (batch_size * num_frames * frame_size)
 
-            optim.zero_grad()
-            loss.backward()
+                optim.zero_grad()
+                loss.backward()
 
-            # Gradient clipping (avoid loss blowups)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optim.step()
-            with torch.inference_mode():
-                if iter_i % 10 == 0:
-                    print(
-                        f"Iter {iter_i} ({batch_i}/{len(dataloader)}), loss: {loss:.4f}, accuracy: {100.0 * accuracy:.2f}% (in {pretty_elapsed(iter_now)})"
-                    )
-                    iter_now = time.time()
-
-                if iter_i != 0 and iter_i % generate_every == 0:
-                    write_csv(f"{PREFIX}_losses.csv", losses)
-
-                    length_in_samples = int(length * dataset.sample_rate)
-                    for gen_i in range(num_generated):
-                        now = time.time()
-                        samples = generate(model, DEVICE, dataset, length_in_samples)
-                        print(f"Generated file in {pretty_elapsed(now)}")
-                        now = time.time()
-                        dataset.write_to_file_with(
-                            f"{PREFIX}_epoch_{epoch_i}_iter_{iter_i}_{gen_i}.wav", samples
-                        )
-                        print(f"Wrote generated file in {pretty_elapsed(now)}")
-
-                if iter_i != 0 and iter_i % checkpoint_every == 0:
-                    try:
-                        now = time.time()
-                        file_path = f"{PREFIX}_epoch_{epoch_i}_iter_{iter_i}_model.pt"
-                        torch.save(
-                            {
-                                "model": model.state_dict(),
-                                "optim": optim.state_dict(),
-                                "epoch": epoch_i,
-                                "iter": iter_i,
-                                "losses": losses,
-                            },
-                            file_path,
-                        )
+                # Gradient clipping (avoid loss blowups)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                optim.step()
+                with torch.inference_mode():
+                    if iter_i % 10 == 0:
                         print(
-                            f"Successfully checkpointed to {file_path} in {pretty_elapsed(now)}"
+                            f"Iter {iter_i} ({batch_i}/{len(dataloader)}), loss: {loss:.4f}, accuracy: {100.0 * accuracy:.2f}% (in {pretty_elapsed(iter_now)})"
                         )
-                    except Exception as e:
-                        print(f"Couldn't checkpoint to file, reason:", e)
+                        iter_now = time.time()
 
-                new_args = read_args(ARGS_FILE)
-                if new_args is not None:
-                    if generate_every != new_args["generate_every"]:
-                        print(
-                            f"updated generate_every: {generate_every} -> {new_args['generate_every']}"
-                        )
-                        generate_every = new_args["generate_every"]
-                    if checkpoint_every != new_args["checkpoint_every"]:
-                        print(
-                            f"updated checkpoint_every: {checkpoint_every} -> {new_args['checkpoint_every']}"
-                        )
-                        checkpoint_every = new_args["checkpoint_every"]
-                    if length != new_args["length"]:
-                        print(f"updated length: {length} -> {new_args['length']}")
-                        length = new_args["length"]
-                    if num_generated != new_args["num_generated"]:
-                        print(
-                            f"updated num_generated: {num_generated} -> {new_args['num_generated']}"
-                        )
-                        num_generated = new_args["num_generated"]
+                    if iter_i != 0 and iter_i % generate_every == 0:
+                        write_csv(f"{PREFIX}_losses.csv", losses)
 
-                iter_i += 1
-        print(f"Epoch {epoch_i}")
-        epoch_i += 1
+                        length_in_samples = int(length * dataset.sample_rate)
+                        for gen_i in range(num_generated):
+                            now = time.time()
+                            samples = generate(
+                                model, DEVICE, dataset, length_in_samples
+                            )
+                            print(f"Generated file in {pretty_elapsed(now)}")
+                            now = time.time()
+                            dataset.write_to_file_with(
+                                f"{PREFIX}_epoch_{epoch_i}_iter_{iter_i}_{gen_i}.wav",
+                                samples,
+                            )
+                            print(f"Wrote generated file in {pretty_elapsed(now)}")
+
+                    if iter_i != 0 and iter_i % checkpoint_every == 0:
+                        write_checkpoint(PREFIX, epoch_i, iter_i, model, optim, losses)
+
+                    new_args = read_args(ARGS_FILE)
+                    if new_args is not None:
+                        if generate_every != new_args["generate_every"]:
+                            print(
+                                f"updated generate_every: {generate_every} -> {new_args['generate_every']}"
+                            )
+                            generate_every = new_args["generate_every"]
+                        if checkpoint_every != new_args["checkpoint_every"]:
+                            print(
+                                f"updated checkpoint_every: {checkpoint_every} -> {new_args['checkpoint_every']}"
+                            )
+                            checkpoint_every = new_args["checkpoint_every"]
+                        if length != new_args["length"]:
+                            print(f"updated length: {length} -> {new_args['length']}")
+                            length = new_args["length"]
+                        if num_generated != new_args["num_generated"]:
+                            print(
+                                f"updated num_generated: {num_generated} -> {new_args['num_generated']}"
+                            )
+                            num_generated = new_args["num_generated"]
+
+                    iter_i += 1
+            print(f"Epoch {epoch_i}")
+            epoch_i += 1
+    except KeyboardInterrupt:
+        print(f"Stopping. Writing checkpoint at iteration {iter_i}, epoch {epoch_i}!")
+        write_checkpoint(PREFIX, epoch_i, iter_i, model, optim, losses)
